@@ -1,0 +1,16 @@
+# pnpm 配置（pnpm 10+ 把「允许运行安装脚本」的开关放在这里）
+#
+# 这个项目不是 monorepo，但 pnpm 一旦看到 pnpm-workspace.yaml 就要求有 packages 字段；
+# 用 "." 表示仓库根目录就是唯一的工作区，`pnpm install --frozen-lockfile` 可以正常跑。
+packages:
+  - '.'
+
+# 预批准这三个包运行安装脚本（各自需要下载 / 编译平台二进制）：
+#   esbuild —— wrangler 打包 Worker 时需要
+#   workerd —— wrangler dev / 本地 D1 需要
+#   sharp   —— miniflare（wrangler 的本地运行时）的图片依赖
+# 不写这一条时 pnpm 10 只警告，pnpm 11 起默认变成致命错误（ERR_PNPM_IGNORED_BUILDS）。
+onlyBuiltDependencies:
+  - esbuild
+  - workerd
+  - sharp

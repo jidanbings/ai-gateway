@@ -1,0 +1,40 @@
+# 本地开发 / 测试脚本（只在本地跑，不进仓库）
+dev-scripts/
+
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 构建产物
+dist/
+
+# Wrangler
+.wrangler/
+.dev.vars
+.env
+.env.*
+
+# 部署时生成的密钥（含明文 ADMIN_TOKEN，请妥善保管或删除）
+secrets-generated.txt
+
+# 本地 D1 数据
+.wrangler/state/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.log
+*.tmp
+_curl.tmp
+
+# 沙箱诊断产物（环境修复时产生，非项目文件）
+acl-report-*.jsonl
+acl-backup-*.txt
+acl-backup-*.txt.json
+acl-backup-*.txt.ps1
+acl-backup-*.txt.rollback.txt
+_pnt/

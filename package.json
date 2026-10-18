@@ -1,0 +1,29 @@
+{
+  "name": "ai-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AI 聚合网关：聚合多个 OpenAI 兼容上游，提供统一 OpenAI 兼容 API 与多用户密钥分发。Fork 后用 npm run deploy 部署到 Cloudflare Workers + D1",
+  "scripts": {
+    "deploy": "node scripts/deploy.mjs",
+    "typecheck": "tsc --noEmit",
+    "check:inline": "node dev-scripts/inline-check.mjs",
+    "dev": "node dev-scripts/local-config.mjs && wrangler dev --config .wrangler/local.jsonc --define __TEST_ENDPOINTS__:true",
+    "db:migrate:local": "node dev-scripts/local-config.mjs && wrangler d1 migrations apply DB --local --config .wrangler/local.jsonc",
+    "test": "node dev-scripts/test.mjs",
+    "seed:dev": "node dev-scripts/seed-dev.mjs",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "hono": "^4.13.11"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260929.1",
+    "miniflare": "5.20260926.0-alpha",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.142.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

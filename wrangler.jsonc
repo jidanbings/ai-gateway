@@ -1,0 +1,50 @@
+// 部署配置：只描述 Worker 本身，**不含 D1 库 UUID，也不声明 secrets.required**。
+//
+// 为什么 D1 不在仓库里：
+//   * `wrangler deploy` 会按配置文件整体覆盖 Worker 的绑定 —— 配置里没有的绑定会被清掉
+//   * 而库 UUID 是每个账号独有的，写进仓库等于把别人的库 ID 发出去
+//   做法：统一用 `npm run deploy`（scripts/deploy.mjs），它会先查找/创建 D1，
+//   再以本文件为模板生成 .wrangler/deploy.jsonc（含 D1 绑定）并部署。
+//   直接 `npx wrangler deploy` 不会带 D1 绑定 —— 连接 GitHub 部署时 Deploy command 必须是 `npm run deploy`。
+//
+// 为什么不写 secrets.required：
+//   wrangler 把 required secrets 当作部署门槛 —— Secret 没加到 Worker 上时直接拒绝部署，
+//   而 Secret 只能加到已存在的 Worker 上，首次部署就会死锁。
+//   两个 Secret 仍然必需，但由业务代码检查：缺配置时打开任何页面都会看到
+//   「尚未完成配置」的说明页（src/lib/setup.ts），而不是让部署失败。
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ai-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-23",
+  // 部署在 <worker>.<子域>.workers.dev 上；要用自己的域名去控制台
+  // Workers → 该 Worker → Settings → Domains & Routes 添加
+  "workers_dev": true,
+  "preview_urls": false,
+
+  // 管理界面以 Text 模块内联进 Worker，避免额外的静态资源与 KV 依赖
+  "rules": [{ "type": "Text", "globs": ["**/*.html"], "fallthrough": true }],
+
+  // 构建期常量：测试辅助端点（/admin/api/__test__/*）只打包进本地开发构建。
+  // 正式部署走 npm run deploy，会把这里覆盖成 false；不跑脚本直接 wrangler deploy
+  // 时默认也是 false —— 漏跑脚本只会少一个本地调试入口，不会把测试端点带上线。
+  "define": {
+    "__TEST_ENDPOINTS__": "false"
+  },
+
+  // 这里只登记「库叫什么、绑定叫什么、迁移放哪」，不登记库 UUID。
+  // npm run deploy 会以本文件为模板，补上 database_id 生成 .wrangler/deploy.jsonc 再部署。
+  // （登记这一条是为了让 `npm run db:migrate:local` / wrangler dev 也能在本地建表。）
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-gateway",
+      "migrations_dir": "migrations"
+    }
+  ]
+
+  // 两个 Secret（Worker 创建后到控制台添加，类型选 Secret）：
+  //   ADMIN_TOKEN     管理后台登录令牌
+  //   ENCRYPTION_KEY  渠道密钥的加密主密钥（一经使用不要更换）
+  // 没有其他 vars；也没有定时任务（cron trigger）：用量明细的清理改由管理页「数据维护」手动触发。
+}
