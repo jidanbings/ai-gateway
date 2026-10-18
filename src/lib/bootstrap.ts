@@ -18,13 +18,13 @@
  *   ok         齐全且可用
  */
 
-import { first, getSetting } from './db.js';
+import { all, first, getSetting, setSetting } from './db.js';
 import { decryptSecret, encryptSecret } from './crypto.js';
 import { ApiError } from './errors.js';
 import type { Env } from '../types.js';
 
 /** 「设置」表里记录主密钥校验值的键 */
-const KEY_CHECK = '__key_check';
+export const KEY_CHECK = '__key_check';
 /** 写进校验值的内容（只用它判断「能否解开」，不参与加密） */
 const KEY_CHECK_VALUE = 'ai-gateway-key-check';
 
@@ -178,4 +178,73 @@ export async function markAdminTokenRotatedAt(env: Env, ts = Date.now()): Promis
   )
     .bind('admin_token_rotated_at', String(ts), ts)
     .run();
+}
+
+/**
+ * 用旧主密钥把库里已加密的渠道 API Key 重新加密到当前主密钥。
+ *
+ * 场景：部署者换了 ENCRYPTION_KEY（现在 state = mismatch），但还记得旧值。此时
+ * 所有 channels.api_key_enc 都是旧密钥加密的，解不开。这个函数用旧密钥解密每条
+ * 明文，再用当前 env.ENCRYPTION_KEY 重新加密写回，并重写 __key_check 校验值，
+ * 让站点从 mismatch 回到 ok，而不必逐个渠道重填 Key。
+ *
+ * 只动 channels.api_key_enc 与 __key_check 两处：其余表（models / users / api_keys /
+ * usage_logs）都不涉及主密钥，不动。返回成功重加密的渠道数。
+ */
+export async function reencryptChannels(
+  env: Env,
+  oldKey: string,
+): Promise<{ reencrypted: number; total: number }> {
+  const newKey = env.ENCRYPTION_KEY;
+  if (!newKey) {
+    throw new ApiError(
+      503,
+      'ENCRYPTION_KEY 未配置：请在 Cloudflare 控制台 Worker → Settings → Variables and Secrets 添加（类型选 Secret）',
+      'api_error',
+      'secret_missing',
+    );
+  }
+
+  const rows = await all<{ id: number; api_key_enc: string }>(
+    env.DB.prepare('SELECT id, api_key_enc FROM channels'),
+  );
+
+  const updates: D1PreparedStatement[] = [];
+  let reencrypted = 0;
+
+  for (const row of rows) {
+    let plain: string;
+    try {
+      plain = await decryptSecret(row.api_key_enc, oldKey);
+    } catch {
+      // 这条不是用旧密钥加密的（比如本身就是明文损坏、或部分渠道已经用新密钥存过），
+      // 跳过，交给「改回原值 / 重新保存」兜底；不能因为一条解不开就整个失败。
+      continue;
+    }
+    const enc = await encryptSecret(plain, newKey);
+    updates.push(
+      env.DB.prepare('UPDATE channels SET api_key_enc = ?, updated_at = ? WHERE id = ?').bind(
+        enc,
+        Date.now(),
+        row.id,
+      ),
+    );
+    reencrypted += 1;
+  }
+
+  // 一条都没解开、但库里明明有渠道：说明这个「旧密钥」不是最初那个值，整个放弃，
+  // 不改任何数据（含 __key_check），让 mismatch 状态保持原样，用户可再试或改回原值。
+  if (reencrypted === 0 && rows.length > 0) {
+    return { reencrypted: 0, total: rows.length };
+  }
+
+  // 校验值也用当前密钥重写：否则即使渠道都重加密了，checkSecrets 仍会判 mismatch
+  const sealed = await encryptSecret(KEY_CHECK_VALUE, newKey);
+  await setSetting(env.DB, KEY_CHECK, sealed);
+
+  if (updates.length > 0) {
+    await env.DB.batch(updates);
+  }
+
+  return { reencrypted, total: rows.length };
 }

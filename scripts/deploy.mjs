@@ -13,6 +13,7 @@
  *      —— 测试辅助端点不进正式产物
  */
 
+import { spawnSync } from 'node:child_process';
 import { DB_NAME, buildDeployConfig, listSecrets, readConfig, resolveD1, wrangler } from './lib/cf.mjs';
 
 function fail(msg) {
@@ -25,6 +26,33 @@ function run(args, label) {
   const result = wrangler(args);
   if (result.error) fail(`${label} 失败：${result.error.message}`);
   if (!result.ok) fail(`${label} 失败（wrangler 退出码 ${result.status}）`);
+}
+
+/**
+ * 解析本次部署的版本指纹（注入 __BUILD_VERSION__，显示在「实例概况」里）。
+ *
+ * 优先级：
+ *   1. Workers Builds 注入的 WORKERS_CI_COMMIT_SHA（连接 GitHub 部署时可用）
+ *   2. 本地 git rev-parse --short HEAD（命令行部署时可用）
+ *   3. 都拿不到就退回部署时刻的时间戳，至少能区分「是不是刚部署的」
+ * 取前 7 位，够辨识又不啰嗦。
+ */
+function resolveBuildVersion() {
+  const ciSha = process.env.WORKERS_CI_COMMIT_SHA;
+  if (ciSha) return ciSha.slice(0, 7);
+
+  try {
+    const r = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+      cwd: new URL('..', import.meta.url).pathname,
+      encoding: 'utf8',
+    });
+    const sha = (r.stdout ?? '').trim();
+    if (r.status === 0 && sha) return sha;
+  } catch {
+    // 忽略，走时间戳兜底
+  }
+
+  return `ts${Date.now().toString(36)}`;
 }
 
 const config = (() => {
@@ -66,10 +94,13 @@ console.log('\n=== [3/4] 应用 D1 迁移 ===');
 run(['d1', 'migrations', 'apply', 'DB', '--remote', '--config', deployConfigPath], '建表 / 升级表结构');
 
 console.log('\n=== [4/4] 部署 Worker ===');
+const buildVersion = resolveBuildVersion();
+console.log(`  版本指纹 : ${buildVersion}`);
 const deployArgs = [
   'deploy',
   '--config', deployConfigPath,
   '--define', '__TEST_ENDPOINTS__:false',
+  '--define', `__BUILD_VERSION__:${JSON.stringify(buildVersion)}`,
 ];
 run(deployArgs, '部署 Worker');
 

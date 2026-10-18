@@ -24,6 +24,7 @@ import {
   encryptionKey,
   getAdminTokenRotatedAt,
   markAdminTokenRotatedAt,
+  reencryptChannels,
 } from '../lib/bootstrap.js';
 import { decryptSecret, encryptSecret, generateApiKey, sha256Hex } from '../lib/crypto.js';
 import { all, first, getSetting, paginate, run, setSetting } from '../lib/db.js';
@@ -51,6 +52,8 @@ export const adminApi = new Hono<{ Bindings: Env }>();
 
 /** 与 index.ts 同源的构建期常量（wrangler define 注入），仅用于界面展示 */
 const TEST_ENDPOINTS = ((): boolean => __TEST_ENDPOINTS__)();
+/** 线上运行的版本指纹（deploy.mjs 注入 commit SHA，本地 dev 为 "dev"），用于确认线上是否最新 */
+const BUILD_VERSION = ((): string => __BUILD_VERSION__)();
 
 // 错误统一由 index.ts 的 app.onError 处理，这里不再重复注册
 
@@ -150,7 +153,8 @@ adminApi.post('/auth/logout', async (c) => {
 
 adminApi.get('/auth/me', async (c) => {
   await requireAdmin(c.req.raw, c.env);
-  return c.json({ ok: true, site_name: await getSiteName(c.env) });
+  const secrets = await checkSecrets(c.env);
+  return c.json({ ok: true, site_name: await getSiteName(c.env), secrets_state: secrets.state });
 });
 
 // 以下所有端点均需登录
@@ -179,7 +183,21 @@ adminApi.get('/dashboard', async (c) => {
   const env = c.env;
   const now = Date.now();
   const days = asNumber(c.req.query('days'), 'days', { min: 1, max: 90, fallback: 7 });
-  const since = now - days * 24 * 3600_000;
+
+  // 日期口径统一为北京时间（UTC+8）的自然日，与 DAY_EXPR 一致。
+  // 「近 N 天」严格等于 N 个自然日：从今天（北京 0 点）往前推 N-1 天作为查询起点，
+  // 这样 SQL 查询、趋势图补齐、以及 totals 的区间口径三者完全对齐，不会多出或少出一天。
+  const beijingDay = (ts: number): string => {
+    const d = new Date(ts + TZ_OFFSET_MS);
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
+  };
+  // 北京某一天的 00:00 对应的 UTC 毫秒时间戳
+  const dayStart = (day: string): number => {
+    const [y, m, dd] = day.split('-').map(Number);
+    return Date.UTC(y as number, (m as number) - 1, dd as number) - TZ_OFFSET_MS;
+  };
+  const since = dayStart(beijingDay(now)) - (days - 1) * DAY_MS;
 
   // 概览只碰数据库两次：一次扫用量（按 天 × 模型 × 渠道 × 用户 分组），一次读配置（4 个计数 + 渠道列表）。
   // 四张卡片的分解全在下面用 JS 卷出来，不再各查一遍 —— 原先「按渠道」那条还额外把整个区间扫了一遍。
@@ -292,6 +310,19 @@ adminApi.get('/dashboard', async (c) => {
   }
 
   const daily = [...dayMap.values()];
+
+  // 补齐区间内的每一天：趋势图要铺满整个查询区间，没流量的那天也要显示出来（值为 0），
+  // 否则只看得到「有数据的那几天」，中间的空白日会凭空消失。
+  // 遍历范围与 since 对齐（beijingDay(since) → beijingDay(now)），正好 days 个自然日。
+  const seenDays = new Set(daily.map((d) => d.day));
+  for (let ts = dayStart(beijingDay(since)); ts <= dayStart(beijingDay(now)); ts += DAY_MS) {
+    const day = beijingDay(ts);
+    if (!seenDays.has(day)) {
+      daily.push({ day, models: {}, modelTokens: {}, ...zero() });
+    }
+  }
+  daily.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+
   const byModel = [...modelMap.values()].sort((a, b) => b.requests - a.requests).slice(0, 10);
   const byUser = [...userMap.values()].sort((a, b) => b.requests - a.requests).slice(0, 10);
 
@@ -1249,6 +1280,8 @@ adminApi.get('/settings', async (c) => {
     model_count: modelCount?.n ?? 0,
     /** 测试辅助端点是否打包进本次构建（只看构建方式，不受任何运行时变量控制） */
     test_endpoints: TEST_ENDPOINTS,
+    /** 线上版本指纹（commit SHA 或 dev），用于确认线上是不是最新代码 */
+    build_version: BUILD_VERSION,
   });
 });
 
@@ -1306,6 +1339,42 @@ adminApi.put('/settings', async (c) => {
   const siteName = asOptionalString(body.site_name, 'site_name', 100);
   if (siteName) await setSetting(c.env.DB, 'site_name', siteName);
   return c.json({ ok: true, site_name: siteName ?? (await getSiteName(c.env)) });
+});
+
+/**
+ * 用旧 ENCRYPTION_KEY 恢复 AI 配置：把库里已加密的渠道 API Key 解密后，
+ * 再用当前环境变量里的 ENCRYPTION_KEY 重新加密写回。
+ *
+ * 场景：部署者换了 ENCRYPTION_KEY 但还记得旧值（此时站点处于 mismatch 状态）。
+ * 提交旧值即可就地恢复，不必逐个渠道重填 Key，也不必把新密钥改回旧值。
+ * 旧值只在本次请求里使用，不落库、不写日志。
+ */
+adminApi.post('/settings/reencrypt', async (c) => {
+  const body = (await c.req.json()) as Record<string, unknown>;
+  const oldKey = asOptionalString(body.old_key, 'old_key', 500);
+  if (!oldKey) throw badRequest('请填写原来的 ENCRYPTION_KEY', 'old_key');
+
+  const { reencrypted, total } = await reencryptChannels(c.env, oldKey);
+
+  // 一条都没解开：旧密钥不对。此时函数没有改任何数据（含校验值），mismatch 状态原样保留。
+  if (reencrypted === 0 && total > 0) {
+    throw new ApiError(
+      409,
+      '用这个旧密钥没能解开任何渠道的 API Key：它多半不是最初那个值。请确认后重试，或改回原值、或逐个渠道重新保存。',
+      'api_error',
+      'encryption_key_mismatch',
+    );
+  }
+
+  const skipped = total - reencrypted;
+  const message =
+    total === 0
+      ? '没有需要重新加密的渠道，主密钥校验值已用当前 ENCRYPTION_KEY 重置。'
+      : skipped > 0
+        ? `已用旧密钥恢复 ${reencrypted} 个渠道，另有 ${skipped} 个渠道用这个旧密钥解不开（可能已是新密钥或数据损坏），请逐个重新保存。`
+        : `已用旧密钥恢复全部 ${reencrypted} 个渠道的 API Key，并用当前 ENCRYPTION_KEY 重新加密。`;
+
+  return c.json({ ok: true, reencrypted, total, message });
 });
 
 // ---------------------------------------------------------------- 数据维护

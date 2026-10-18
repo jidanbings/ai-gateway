@@ -26,6 +26,8 @@ export interface AdminSession {
   last_seen_at: number;
   ip: string | null;
   ua: string | null;
+  /** 登录那一刻 ADMIN_TOKEN 的 SHA-256 指纹；换令牌后据此作废旧会话 */
+  token_hash: string | null;
 }
 
 function parseCookies(request: Request): Record<string, string> {
@@ -102,8 +104,12 @@ export async function createSession(
   const now = Date.now();
   const expiresAt = now + SESSION_TTL_MS;
 
+  // 记录登录那一刻 ADMIN_TOKEN 的指纹：换令牌后，requireAdmin 发现指纹对不上就会
+  // 作废旧会话，逼着所有人用新令牌重新登录
+  const tokenHash = await sha256Hex(adminToken(env));
+
   await env.DB.prepare(
-    'INSERT INTO admin_sessions (id, created_at, expires_at, last_seen_at, ip, ua) VALUES (?,?,?,?,?,?)',
+    'INSERT INTO admin_sessions (id, created_at, expires_at, last_seen_at, ip, ua, token_hash) VALUES (?,?,?,?,?,?,?)',
   )
     .bind(
       id,
@@ -112,6 +118,7 @@ export async function createSession(
       now,
       request.headers.get('cf-connecting-ip') ?? '',
       (request.headers.get('user-agent') ?? '').slice(0, 300),
+      tokenHash,
     )
     .run();
 
@@ -147,6 +154,16 @@ export async function requireAdmin(request: Request, env: Env): Promise<AdminSes
   if (session.expires_at <= now) {
     await env.DB.prepare('DELETE FROM admin_sessions WHERE id = ?').bind(id).run().catch(() => undefined);
     throw unauthorized('会话已过期，请重新登录');
+  }
+
+  // 换了 ADMIN_TOKEN 后作废旧会话：会话里存的是登录时的令牌指纹，和当前令牌对不上
+  // 就删除会话并要求重新登录。token_hash 为 NULL 的存量会话（迁移落地前签发的）跳过比对。
+  if (session.token_hash) {
+    const currentHash = await sha256Hex(adminToken(env));
+    if (!timingSafeEqual(session.token_hash, currentHash)) {
+      await env.DB.prepare('DELETE FROM admin_sessions WHERE id = ?').bind(id).run().catch(() => undefined);
+      throw unauthorized('管理令牌已更换，请用新令牌重新登录');
+    }
   }
 
   // 每 5 分钟回写一次活跃时间，避免每个请求都写库

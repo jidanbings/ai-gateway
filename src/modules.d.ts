@@ -9,3 +9,6 @@ declare module '*.html' {
  * `npm run dev` 为 true，`npm run build` / 正式部署为 false。
  */
 declare const __TEST_ENDPOINTS__: boolean;
+
+/** 版本指纹：正式部署时由 deploy.mjs 注入 commit SHA，本地 dev 为 "dev" */
+declare const __BUILD_VERSION__: string;

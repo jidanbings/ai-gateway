@@ -1360,6 +1360,12 @@ async function showApp(me) {
     $('#siteName').textContent = me.site_name;
     document.title = me.site_name + ' · 管理后台';
   }
+  // ENCRYPTION_KEY 换错（mismatch）时，别的页签都会因渠道密钥解不开而 503，
+  // 直接带管理员到「设置」页，用旧密钥就地恢复
+  if (me && me.secrets_state === 'mismatch') {
+    currentView = 'settings';
+    history.replaceState({ view: 'settings' }, '', '/admin/settings');
+  }
   applyPageMeta(currentView);
   await render();
 }
@@ -2883,8 +2889,52 @@ viewHandlers.settings = async () => {
   secretRows.appendChild(checkRow('ENCRYPTION_KEY', d.encryption_key_set && d.secrets_state !== 'mismatch', '上游渠道密钥的加密主密钥'));
   if (d.secrets_state === 'mismatch') {
     secretRows.appendChild(el('div', { class: 'hint', style: 'margin-top:10px;color:var(--err)' }, [
-      el('div', { text: 'ENCRYPTION_KEY 与库中已加密的渠道密钥对不上（多半是换过值）。' }),
-      el('div', { text: '把控制台里的 ENCRYPTION_KEY 改回最初的值即可；若无法找回，请重新保存每个渠道的 API Key。' })
+      el('div', { text: 'ENCRYPTION_KEY 与库中已加密的渠道密钥对不上（多半是换过值）。' })
+    ]));
+
+    // 就地恢复：用旧密钥把渠道 API Key 解密，再用当前 ENCRYPTION_KEY 重新加密
+    const recoverWrap = el('div', { style: 'margin-top:12px;padding-top:12px;border-top:1px solid var(--border)' });
+    const recoverInput = el('input', {
+      type: 'password',
+      placeholder: '粘贴原来的 ENCRYPTION_KEY',
+      autocomplete: 'off'
+    });
+    const recoverBtn = el('button', { class: 'primary', text: '用旧密钥恢复' });
+    const recoverState = el('div', { class: 'hint', style: 'margin-top:8px' });
+
+    recoverBtn.addEventListener('click', async () => {
+      const oldKey = recoverInput.value.trim();
+      if (!oldKey) { recoverState.textContent = '请先粘贴原来的 ENCRYPTION_KEY'; return; }
+      recoverBtn.disabled = true;
+      recoverState.textContent = '正在用旧密钥解密并重新加密…';
+      try {
+        const r = await api('/settings/reencrypt', { method: 'POST', body: { old_key: oldKey } });
+        recoverState.textContent = r.message || '已恢复';
+        recoverInput.value = '';
+        toast(r.message || '已恢复', 'ok');
+        // 恢复成功后状态已回到 ok，重取一次数据刷新状态行
+        setTimeout(() => { render(); }, 400);
+      } catch (e) {
+        recoverState.textContent = e.message;
+        toast(e.message, 'err');
+      } finally {
+        recoverBtn.disabled = false;
+      }
+    });
+
+    recoverWrap.appendChild(el('div', { class: 'hint', style: 'margin-top:0' }, [
+      el('div', { text: '如果还记得最初那个 ENCRYPTION_KEY，可以在这里直接恢复：' }),
+      el('div', { text: 'Worker 会用旧密钥把已保存的渠道 API Key 解开，再用控制台里当前这个 ENCRYPTION_KEY 重新加密，不必逐个渠道重填。旧值只在这次请求里用一下，不落库、不写日志。' })
+    ]));
+    recoverWrap.appendChild(el('div', { class: 'inline', style: 'margin-top:8px' }, [
+      el('div', { class: 'field', style: 'flex:1;min-width:200px;margin-bottom:0' }, recoverInput),
+      recoverBtn
+    ]));
+    recoverWrap.appendChild(recoverState);
+    secretRows.appendChild(recoverWrap);
+
+    secretRows.appendChild(el('div', { class: 'hint', style: 'margin-top:10px' }, [
+      el('div', { text: '或者：把控制台里的 ENCRYPTION_KEY 改回最初的值；实在找不回，就逐个渠道重新保存 API Key。' })
     ]));
   }
   if (missing.length > 0) {
@@ -2920,7 +2970,9 @@ viewHandlers.settings = async () => {
   const metaCard = el('div', { class: 'card' }, [el('div', { class: 'card-head' }, [el('h2', { text: '实例概况' })])]);
   metaCard.appendChild(el('div', { class: 'hint' }, [
     el('div', { text: '上游渠道 / 模型：' + int(d.channel_count) + ' / ' + int(d.model_count) }),
-    el('div', { text: '测试辅助端点：' + (d.test_endpoints ? '已启用（仅本地开发构建）' : '未打包（正式构建）') })
+    el('div', { text: '测试辅助端点：' + (d.test_endpoints ? '已启用（仅本地开发构建）' : '未打包（正式构建）') }),
+    el('div', { style: 'margin-top:4px', html: '版本：<code>' + (d.build_version || '未知') + '</code>' +
+      (d.build_version && d.build_version !== 'dev' ? '　<a href="https://github.com/jidanbings/ai-gateway/commit/' + d.build_version + '" target="_blank" rel="noopener">查看提交</a>' : '') })
   ]));
 
   wrap.appendChild(el('div', { class: 'grid-2' }, [secretRows, siteCard]));

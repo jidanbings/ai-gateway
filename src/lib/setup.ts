@@ -31,6 +31,20 @@ export function apiErrorPayload(status: SecretsStatus) {
       },
     };
   }
+  if (status.state === 'mismatch') {
+    return {
+      status: 503,
+      body: {
+        error: {
+          message:
+            'ENCRYPTION_KEY 与库中已加密的数据不匹配：请登录管理后台，在「设置」里用旧密钥恢复，或把控制台里的 ENCRYPTION_KEY 改回最初的值。',
+          type: 'api_error',
+          param: null,
+          code: 'encryption_key_mismatch',
+        },
+      },
+    };
+  }
   return {
     status: 503,
     body: {
@@ -47,6 +61,10 @@ export function apiErrorPayload(status: SecretsStatus) {
 export function renderSetupPage(status: SecretsStatus, siteName: string): string {
   const isMissing = (key: string) => status.missing.includes(key as never);
 
+  const pending = status.missing.length;
+  const dbBlocked = status.state === 'no-db';
+  const mismatched = status.state === 'mismatch';
+
   const items = REQUIRED_SECRETS.map((req) => {
     const missing = isMissing(req.key);
     return `
@@ -60,14 +78,67 @@ export function renderSetupPage(status: SecretsStatus, siteName: string): string
       </div>`;
   }).join('');
 
-  const pending = status.missing.length;
-  const dbBlocked = status.state === 'no-db';
+  const title = mismatched
+    ? '加密主密钥不匹配'
+    : dbBlocked
+      ? '数据库尚未初始化'
+      : '尚未完成配置';
+  const heading = mismatched
+    ? 'ENCRYPTION_KEY 对不上'
+    : dbBlocked
+      ? '还差一步：建表'
+      : `还差 ${pending} 项配置`;
+  const sub = mismatched
+    ? '控制台里的 ENCRYPTION_KEY 与库中已加密的渠道密钥对不上（多半是换过值）。登录管理后台即可用旧密钥就地恢复。'
+    : dbBlocked
+      ? 'Worker 已成功部署，但数据库里还没有表。执行下面的命令后刷新本页即可。'
+      : 'Worker 已成功部署，数据库也已就绪，只差下面这几个密钥。补齐后刷新本页即可。';
 
-  const title = dbBlocked ? '数据库尚未初始化' : '尚未完成配置';
-  const heading = dbBlocked ? '还差一步：建表' : `还差 ${pending} 项配置`;
-  const sub = dbBlocked
-    ? 'Worker 已成功部署，但数据库里还没有表。执行下面的命令后刷新本页即可。'
-    : 'Worker 已成功部署，数据库也已就绪，只差下面这几个密钥。补齐后刷新本页即可。';
+  const body =
+    mismatched
+      ? `<div class="card">
+    <h2>怎么恢复</h2>
+    <ol>
+      <li>打开 <a href="/admin">/admin</a>，用 <code>ADMIN_TOKEN</code> 登录（它独立于 ENCRYPTION_KEY，仍可登录）</li>
+      <li>进入「设置」页，在「密钥配置检查」里粘贴<strong>原来那个</strong> ENCRYPTION_KEY，点「用旧密钥恢复」</li>
+      <li>Worker 会用旧密钥解开已保存的渠道 API Key，再用控制台里当前这个 ENCRYPTION_KEY 重新加密</li>
+    </ol>
+    <p class="note">不记得旧值的话：把控制台的 ENCRYPTION_KEY 改回最初的值；实在找不回，就逐个渠道重新保存 API Key。</p>
+  </div>`
+      : dbBlocked
+        ? `<div class="card">
+    <h2>建表</h2>
+    <p>在项目目录执行：</p>
+    <pre>npx wrangler d1 migrations apply DB --remote</pre>
+    <p class="note">或者直接重新部署一次（<code>npm run deploy</code> 会自动跑迁移）。</p>
+  </div>`
+        : `<div class="card">
+    <h2>密钥检查</h2>
+    ${items}
+  </div>
+
+  <div class="card">
+    <h2>怎么补（都在 Cloudflare 控制台操作）</h2>
+    <ol>
+      <li>打开 <code>dash.cloudflare.com</code> → <code>Workers &amp; Pages</code> → 点进这个 Worker</li>
+      <li><code>Settings</code> → <code>Variables and Secrets</code> → <code>Add</code>，
+          类型<b>必须选 <code>Secret</code></b>（加密变量），不要选 Plaintext / Text</li>
+      <li>分别添加 <code>ADMIN_TOKEN</code> 与 <code>ENCRYPTION_KEY</code>，各填一个 16 位以上随机串</li>
+      <li>保存后刷新本页，即可用 <code>ADMIN_TOKEN</code> 登录 <a href="/admin">/admin</a></li>
+    </ol>
+    <p class="note">生成随机串：</p>
+    <pre>${escapeHtml(GEN_CMD)}</pre>
+    <p class="note">密钥只存在 Cloudflare 上，不经过仓库、不经过本地文件。
+      也可以用命令行添加：<code>npx wrangler secret put ADMIN_TOKEN</code>。
+      ENCRYPTION_KEY 一旦确定就不要更换，否则已保存的渠道密钥会解不开。</p>
+  </div>`;
+
+  const badgeTone = mismatched
+    ? 'rgba(220,38,38,.1)'
+    : dbBlocked
+      ? 'rgba(220,38,38,.1)'
+      : 'rgba(180,83,9,.12)';
+  const badgeColor = mismatched ? 'var(--err)' : dbBlocked ? 'var(--err)' : '#b45309';
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -88,8 +159,8 @@ export function renderSetupPage(status: SecretsStatus, siteName: string): string
          font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
   .wrap { max-width:720px; margin:0 auto; }
   .badge { display:inline-flex; align-items:center; gap:6px; padding:4px 12px; border-radius:999px;
-           background:${dbBlocked ? 'rgba(220,38,38,.1)' : 'rgba(180,83,9,.12)'};
-           color:${dbBlocked ? 'var(--err)' : '#b45309'}; font-size:13px; font-weight:600; }
+           background:${badgeTone};
+           color:${badgeColor}; font-size:13px; font-weight:600; }
   h1 { font-size:26px; margin:14px 0 8px; }
   .sub { color:var(--muted); margin:0 0 24px; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:20px 22px; margin-bottom:18px; }
@@ -115,35 +186,7 @@ export function renderSetupPage(status: SecretsStatus, siteName: string): string
   <h1>${escapeHtml(heading)}</h1>
   <p class="sub">${escapeHtml(sub)}</p>
 
-  ${
-    dbBlocked
-      ? `<div class="card">
-    <h2>建表</h2>
-    <p>在项目目录执行：</p>
-    <pre>npx wrangler d1 migrations apply DB --remote</pre>
-    <p class="note">或者直接重新部署一次（<code>npm run deploy</code> 会自动跑迁移）。</p>
-  </div>`
-      : `<div class="card">
-    <h2>密钥检查</h2>
-    ${items}
-  </div>
-
-  <div class="card">
-    <h2>怎么补（都在 Cloudflare 控制台操作）</h2>
-    <ol>
-      <li>打开 <code>dash.cloudflare.com</code> → <code>Workers &amp; Pages</code> → 点进这个 Worker</li>
-      <li><code>Settings</code> → <code>Variables and Secrets</code> → <code>Add</code>，
-          类型<b>必须选 <code>Secret</code></b>（加密变量），不要选 Plaintext / Text</li>
-      <li>分别添加 <code>ADMIN_TOKEN</code> 与 <code>ENCRYPTION_KEY</code>，各填一个 16 位以上随机串</li>
-      <li>保存后刷新本页，即可用 <code>ADMIN_TOKEN</code> 登录 <a href="/admin">/admin</a></li>
-    </ol>
-    <p class="note">生成随机串：</p>
-    <pre>${escapeHtml(GEN_CMD)}</pre>
-    <p class="note">密钥只存在 Cloudflare 上，不经过仓库、不经过本地文件。
-      也可以用命令行添加：<code>npx wrangler secret put ADMIN_TOKEN</code>。
-      ENCRYPTION_KEY 一旦确定就不要更换，否则已保存的渠道密钥会解不开。</p>
-  </div>`
-  }
+  ${body}
 </div>
 </body>
 </html>`;

@@ -92,6 +92,26 @@ app.use('*', async (c, next) => {
     return next();
   }
 
+  // mismatch：主密钥与库中密文对不上（换了 ENCRYPTION_KEY）。这与「还没配好」不同——
+  // 站点其实已经部署过、有数据，只是密钥对不上。此时：
+  //   * 页面请求（/、/admin 等 GET）放行，让管理员正常登录后台，在设置页用旧密钥恢复；
+  //   * /admin/api/auth 与 /admin/api/settings 放行（ADMIN_TOKEN 独立于 ENCRYPTION_KEY，
+  //     管理员仍可登录、调用 POST /settings/reencrypt 就地恢复；这些端点内部有 requireAdmin 兜底）；
+  //   * 其余 API（/v1、其他 /admin/api）照常拦成 503（渠道密钥解不开，代理必然失败）。
+  if (status.state === 'mismatch') {
+    const isApi =
+      path.startsWith('/v1') ||
+      path.startsWith('/user') ||
+      path.startsWith('/admin/api') ||
+      c.req.method !== 'GET';
+    if (!isApi) return next();
+    if (path.startsWith('/admin/api/auth') || path.startsWith('/admin/api/settings')) {
+      return next();
+    }
+    const { status: code, body } = apiErrorPayload(status);
+    return c.json(body, code as 503);
+  }
+
   const isApi =
     path.startsWith('/v1') ||
     path.startsWith('/user') ||

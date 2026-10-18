@@ -28,8 +28,11 @@
   // 构建期常量：测试辅助端点（/admin/api/__test__/*）只打包进本地开发构建。
   // 正式部署走 npm run deploy，会把这里覆盖成 false；不跑脚本直接 wrangler deploy
   // 时默认也是 false —— 漏跑脚本只会少一个本地调试入口，不会把测试端点带上线。
+  // __BUILD_VERSION__ 是「线上跑的哪一版代码」的指纹：正式部署时由 deploy.mjs 注入
+  // commit SHA，本地 dev 显示 dev，用于在「实例概况」里一眼确认线上是否最新。
   "define": {
-    "__TEST_ENDPOINTS__": "false"
+    "__TEST_ENDPOINTS__": "false",
+    "__BUILD_VERSION__": "\"dev\""
   },
 
   // 这里只登记「库叫什么、绑定叫什么、迁移放哪」，不登记库 UUID。
